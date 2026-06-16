@@ -1,0 +1,1201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GATEWRIGHT</title>
+<!--
+  GATEWRIGHT
+  Drag and wire basic logic for the Arduino MKR VIDOR 4000 FPGA.
+  Place gates, flip-flops and registers, wire them to the MKR header
+  pins, and read out synthesizable Verilog that drops straight into
+  Arduino's MKRVIDOR4000_top template (the user.v include hook).
+
+  This tool emits source, not a bitstream. The Cyclone 10 LP part is
+  synthesized and placed by Intel Quartus Prime Lite, which produces
+  the .ttf that the SAMD21 loads at boot. There is no in-browser path
+  to a Cyclone 10 bitstream.
+
+  License: GNU General Public License v3.0 (GPL-3.0).
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version. This program is distributed in
+  the hope that it will be useful, but WITHOUT ANY WARRANTY; without
+  even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+  PARTICULAR PURPOSE. See the GNU General Public License for details.
+-->
+<style>
+  :root{
+    --pine:#101b15;
+    --pine-2:#16241c;
+    --slate:#0c130f;
+    --sage:#6f8f7a;
+    --sage-dim:#46604f;
+    --forest:#274434;
+    --forest-2:#2f5040;
+    --copper:#c08a4a;
+    --copper-bright:#e0a85e;
+    --parchment:#ece4d3;
+    --parchment-dim:#cabfa6;
+    --signal:#8fd6a0;
+    --alarm:#d9714e;
+    --line:#23362b;
+    --ink:#d8e3da;
+    --grid:rgba(192,138,74,0.10);
+    --grid-strong:rgba(192,138,74,0.20);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;
+    background:var(--pine);
+    color:var(--ink);
+    font-family:ui-sans-serif,"Helvetica Neue",Arial,sans-serif;
+    font-size:14px;
+    overflow:hidden;
+  }
+  .mono{font-family:ui-monospace,"SF Mono","Cascadia Mono",Consolas,"Liberation Mono",monospace}
+
+  /* ---- frame ---- */
+  .app{display:grid;grid-template-rows:auto 1fr;height:100vh}
+
+  header.plate{
+    display:flex;align-items:center;gap:16px;
+    padding:10px 16px;
+    background:linear-gradient(180deg,var(--pine-2),var(--pine));
+    border-bottom:1px solid var(--line);
+  }
+  .mark{
+    display:flex;flex-direction:column;line-height:1;
+    border-left:3px solid var(--copper);padding-left:12px;
+  }
+  .mark b{
+    font-weight:800;letter-spacing:.34em;font-size:18px;color:var(--parchment);
+    text-transform:uppercase;
+  }
+  .mark span{
+    margin-top:5px;font-size:10.5px;letter-spacing:.18em;color:var(--sage);
+    text-transform:uppercase;
+  }
+  .lamp{display:flex;align-items:center;gap:8px;margin-left:6px}
+  .bulb{width:11px;height:11px;border-radius:50%;background:var(--sage-dim);
+    box-shadow:0 0 0 1px #0006 inset;transition:.2s}
+  .bulb.ok{background:var(--signal);box-shadow:0 0 8px var(--signal)}
+  .bulb.bad{background:var(--alarm);box-shadow:0 0 8px var(--alarm)}
+  .lamp small{font-size:10.5px;letter-spacing:.12em;color:var(--parchment-dim);text-transform:uppercase}
+  .spacer{flex:1}
+  .tools{display:flex;gap:8px;flex-wrap:wrap}
+  button.t{
+    background:var(--forest);color:var(--parchment);border:1px solid var(--forest-2);
+    padding:7px 11px;border-radius:5px;cursor:pointer;font-size:12px;letter-spacing:.04em;
+    transition:.12s;
+  }
+  button.t:hover{background:var(--forest-2);border-color:var(--copper)}
+  button.t.ghost{background:transparent}
+  button.t.warn:hover{border-color:var(--alarm)}
+
+  /* ---- body grid ---- */
+  .work{display:grid;grid-template-columns:188px 1fr 420px;min-height:0}
+  @media (max-width:1100px){.work{grid-template-columns:168px 1fr 340px}}
+
+  /* ---- palette ---- */
+  aside.palette{
+    background:var(--pine-2);border-right:1px solid var(--line);
+    overflow:auto;padding:12px 10px;
+  }
+  .pgroup{margin-bottom:16px}
+  .pgroup h4{
+    margin:0 0 8px 2px;font-size:10px;letter-spacing:.2em;color:var(--copper);
+    text-transform:uppercase;font-weight:700;
+  }
+  .pitem{
+    display:flex;align-items:center;gap:9px;width:100%;
+    background:var(--slate);border:1px solid var(--line);
+    color:var(--ink);padding:7px 9px;border-radius:5px;margin-bottom:6px;
+    cursor:pointer;text-align:left;font-size:12.5px;transition:.12s;
+  }
+  .pitem:hover{border-color:var(--copper);background:#10201a}
+  .pitem.armed{border-color:var(--copper-bright);box-shadow:0 0 0 1px var(--copper) inset;background:#13241c}
+  .pitem svg{flex:0 0 auto}
+  .palette .hint{font-size:10.5px;color:var(--sage);line-height:1.5;margin:2px 2px 0}
+
+  /* ---- canvas ---- */
+  .sheetwrap{position:relative;background:var(--slate);overflow:hidden}
+  .sheetwrap svg.sheet{position:absolute;inset:0;width:100%;height:100%;
+    cursor:default;touch-action:none}
+  .grid-bg{
+    position:absolute;inset:0;pointer-events:none;
+    background-image:
+      linear-gradient(var(--grid) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px),
+      linear-gradient(var(--grid-strong) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid-strong) 1px,transparent 1px);
+    background-size:22px 22px,22px 22px,110px 110px,110px 110px;
+  }
+  .overlay{
+    position:absolute;left:12px;bottom:12px;display:flex;gap:8px;align-items:center;
+    background:#0b120ecc;border:1px solid var(--line);border-radius:6px;padding:6px 8px;
+    font-size:11px;color:var(--parchment-dim);backdrop-filter:blur(2px);
+  }
+  .overlay button{background:var(--forest);color:var(--parchment);border:1px solid var(--forest-2);
+    width:26px;height:24px;border-radius:4px;cursor:pointer;font-size:14px;line-height:1}
+  .overlay button:hover{border-color:var(--copper)}
+  .statusline{
+    position:absolute;left:12px;top:12px;right:12px;display:flex;gap:10px;align-items:center;
+    pointer-events:none;font-size:11px;color:var(--sage);letter-spacing:.06em;
+  }
+  .statusline .tag{
+    background:#0b120ecc;border:1px solid var(--line);border-radius:5px;padding:4px 8px;
+    pointer-events:auto;
+  }
+
+  /* svg comp styling */
+  .comp{cursor:grab}
+  .comp .body{fill:#13211a;stroke:var(--sage-dim);stroke-width:1.5}
+  .comp.sel .body{stroke:var(--copper-bright);stroke-width:2}
+  .comp .glyph{fill:none;stroke:var(--parchment);stroke-width:1.8;stroke-linejoin:round}
+  .comp .lbl{fill:var(--parchment-dim);font:600 10px ui-monospace,monospace;text-anchor:middle;pointer-events:none}
+  .comp .sub{fill:var(--copper);font:700 8.5px ui-sans-serif,sans-serif;text-anchor:middle;pointer-events:none;letter-spacing:.08em}
+  .port{fill:var(--slate);stroke:var(--sage);stroke-width:1.5;cursor:crosshair}
+  .port:hover{fill:var(--copper-bright);stroke:var(--copper-bright);r:6}
+  .port.out{stroke:var(--copper)}
+  .port.pending{fill:var(--copper-bright);stroke:var(--copper-bright)}
+  .portlbl{fill:var(--sage);font:600 8px ui-monospace,monospace;pointer-events:none}
+  .wire{stroke:var(--copper);stroke-width:2;fill:none;cursor:pointer;opacity:.9}
+  .wire:hover{stroke:var(--copper-bright);stroke-width:3}
+  .wire.sel{stroke:var(--signal)}
+  .rubber{stroke:var(--copper-bright);stroke-width:2;fill:none;stroke-dasharray:5 4;pointer-events:none}
+
+  /* ---- output panel ---- */
+  .out{background:var(--parchment);color:#23301f;display:flex;flex-direction:column;min-height:0;
+    border-left:1px solid #00000022}
+  .tabs{display:flex;gap:2px;padding:8px 8px 0;background:#e2d9c5}
+  .tab{
+    border:none;background:#d8cdb4;color:#4a553c;padding:8px 12px;border-radius:6px 6px 0 0;
+    cursor:pointer;font-size:11.5px;letter-spacing:.06em;font-weight:700;text-transform:uppercase;
+  }
+  .tab.active{background:var(--parchment);color:#1c2916}
+  .outhead{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #00000018}
+  .outhead .fn{font-weight:700;font-size:12px;letter-spacing:.04em}
+  .outhead .grow{flex:1}
+  .outhead button{
+    background:var(--forest);color:var(--parchment);border:1px solid var(--forest-2);
+    padding:5px 9px;border-radius:4px;cursor:pointer;font-size:11px
+  }
+  .outhead button:hover{border-color:var(--copper)}
+  .codebox{flex:1;overflow:auto;margin:0;padding:12px 14px;font-size:12px;line-height:1.55;
+    white-space:pre;color:#1c2916;background:repeating-linear-gradient(
+      transparent,transparent 21px,#0000000a 21px,#0000000a 22px)}
+  .diag{padding:10px 14px;border-top:1px solid #00000018;max-height:32%;overflow:auto;background:#e8e0cd}
+  .diag h5{margin:0 0 6px;font-size:10px;letter-spacing:.16em;color:#6a5a2f;text-transform:uppercase}
+  .diag .row{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;margin:3px 0;line-height:1.4}
+  .diag .row b{flex:0 0 auto;font-weight:700}
+  .diag .err b{color:#a23b22}
+  .diag .warn b{color:#9a6a18}
+  .diag .ok b{color:#2f6a3e}
+  .diag .clean{color:#3a4a30;font-size:11.5px}
+
+  /* scrollbars */
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#2c4234;border-radius:8px}
+  .out ::-webkit-scrollbar-thumb{background:#c3b793}
+  ::-webkit-scrollbar-track{background:transparent}
+
+  input[type=file]{display:none}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="plate">
+    <div class="mark"><b>Gatewright</b><span>drag and wire logic &middot; mkr vidor 4000</span></div>
+    <div class="lamp"><div class="bulb" id="lamp"></div><small id="lamptxt">empty sheet</small></div>
+    <div class="spacer"></div>
+    <div class="tools">
+      <button class="t ghost" id="btnExample">Load example</button>
+      <button class="t ghost" id="btnImport">Open .json</button>
+      <button class="t ghost" id="btnExport">Save .json</button>
+      <button class="t warn" id="btnClear">Clear sheet</button>
+      <input type="file" id="fileIn" accept="application/json,.json">
+    </div>
+  </header>
+
+  <div class="work">
+    <!-- palette -->
+    <aside class="palette" id="palette">
+      <div class="pgroup">
+        <h4>Sources / pins</h4>
+        <button class="pitem" data-add="IN">[ICON]<span>Input pin</span></button>
+        <button class="pitem" data-add="OUT">[ICON]<span>Output pin</span></button>
+        <button class="pitem" data-add="CLK">[ICON]<span>Clock (iCLK)</span></button>
+        <button class="pitem" data-add="CONST0">[ICON]<span>Constant 0</span></button>
+        <button class="pitem" data-add="CONST1">[ICON]<span>Constant 1</span></button>
+      </div>
+      <div class="pgroup">
+        <h4>Logic gates</h4>
+        <button class="pitem" data-add="AND">[ICON]<span>AND</span></button>
+        <button class="pitem" data-add="OR">[ICON]<span>OR</span></button>
+        <button class="pitem" data-add="XOR">[ICON]<span>XOR</span></button>
+        <button class="pitem" data-add="NAND">[ICON]<span>NAND</span></button>
+        <button class="pitem" data-add="NOR">[ICON]<span>NOR</span></button>
+        <button class="pitem" data-add="XNOR">[ICON]<span>XNOR</span></button>
+        <button class="pitem" data-add="NOT">[ICON]<span>NOT</span></button>
+        <button class="pitem" data-add="BUF">[ICON]<span>Buffer</span></button>
+      </div>
+      <div class="pgroup">
+        <h4>Sequential</h4>
+        <button class="pitem" data-add="DFF">[ICON]<span>D flip-flop</span></button>
+        <button class="pitem" data-add="REG">[ICON]<span>Register (n-bit)</span></button>
+      </div>
+      <div class="pgroup">
+        <p class="hint">Click a part to arm it, then click the sheet to drop it. Click an output pad then an input pad to wire. Select and press Delete to remove. Wires fan out from one driver to many inputs.</p>
+      </div>
+    </aside>
+
+    <!-- canvas -->
+    <div class="sheetwrap" id="sheetwrap">
+      <div class="grid-bg"></div>
+      <svg class="sheet" id="sheet">
+        <g id="view">
+          <g id="wires"></g>
+          <g id="comps"></g>
+          <path id="rubber" class="rubber" style="display:none"></path>
+        </g>
+      </svg>
+      <div class="statusline"><span class="tag" id="hint">Pick a part from the left to begin</span></div>
+      <div class="overlay">
+        <button id="zoomOut" title="Zoom out">&minus;</button>
+        <span id="zoomTxt" class="mono">100%</span>
+        <button id="zoomIn" title="Zoom in">+</button>
+        <button id="zoomFit" title="Reset view" style="width:auto;padding:0 7px;font-size:11px">fit</button>
+      </div>
+    </div>
+
+    <!-- output -->
+    <section class="out">
+      <div class="tabs" id="tabs">
+        <button class="tab active" data-tab="verilog">user.v</button>
+        <button class="tab" data-tab="sketch">sketch.ino</button>
+        <button class="tab" data-tab="pins">pin map</button>
+        <button class="tab" data-tab="flow">quartus flow</button>
+      </div>
+      <div class="outhead">
+        <span class="fn mono" id="outfn">user.v</span>
+        <span class="grow"></span>
+        <button id="btnCopy">Copy</button>
+        <button id="btnDl">Download</button>
+      </div>
+      <pre class="codebox mono" id="codebox"></pre>
+      <div class="diag" id="diag"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================
+   GATEWRIGHT  (GPL-3.0)
+   schematic -> synthesizable Verilog for MKR VIDOR 4000
+   ============================================================ */
+
+/* ---- board facts (from Arduino vidor_s_pins.qsf) ---- */
+const DEVICE = "10CL016YU256C8G";
+const FAMILY = "Cyclone 10 LP";
+const TOPMOD = "MKRVIDOR4000_top";
+const PIN_BALL = {
+  A0:"C2", A1:"C3", A2:"C6", A3:"D1", A4:"D3", A5:"F3", A6:"G2",
+  D0:"G1", D1:"N3", D2:"P3", D3:"R3", D4:"T3", D5:"T2", D6:"G16", D7:"G15",
+  D8:"F16", D9:"F15", D10:"C16", D11:"C15", D12:"B16", D13:"C11", D14:"A13"
+};
+const PIN_LIST = ["D0","D1","D2","D3","D4","D5","D6","D7","D8","D9","D10","D11","D12","D13","D14",
+                  "A0","A1","A2","A3","A4","A5","A6"];
+
+/* ---- model ---- */
+let comps = {};     // id -> {type,x,y,props}
+let wires = [];     // {id, from:{c,p}, to:{c,p}}   from = output side, to = input side
+let nextId = 1;
+let selected = null;  // {kind:'comp'|'wire', id}
+
+/* ---- view ---- */
+let view = {scale:1, tx:60, ty:60};
+
+/* ---- interaction state ---- */
+let armed = null;       // type to place
+let dragComp = null;    // {id, dx, dy}
+let panning = null;     // {x,y,tx,ty}
+let pending = null;     // {c,p,dir} starting port for a wire
+
+const SVG = document.getElementById("sheet");
+const VIEW = document.getElementById("view");
+const GC = document.getElementById("comps");
+const GW = document.getElementById("wires");
+const RUBBER = document.getElementById("rubber");
+const NS = "http://www.w3.org/2000/svg";
+
+/* ============================================================
+   component geometry
+   ============================================================ */
+function defaultProps(type){
+  if(type==="IN")  return {pin:firstFreePin("in")};
+  if(type==="OUT") return {pin:firstFreePin("out")};
+  if(type==="REG") return {width:4};
+  return {};
+}
+function firstFreePin(){
+  const used = new Set(Object.values(comps)
+    .filter(c=>c.type==="IN"||c.type==="OUT").map(c=>c.props.pin));
+  for(const p of PIN_LIST) if(!used.has(p)) return p;
+  return "D0";
+}
+
+/* ports: {name, dir, dx, dy}  offsets from comp origin */
+function portsOf(c){
+  switch(c.type){
+    case "IN":     return [{name:"io",dir:"out",dx:70,dy:20}];
+    case "OUT":    return [{name:"io",dir:"in", dx:0, dy:20}];
+    case "CLK":    return [{name:"clk",dir:"out",dx:70,dy:20}];
+    case "CONST0":
+    case "CONST1": return [{name:"y",dir:"out",dx:50,dy:18}];
+    case "NOT":
+    case "BUF":    return [{name:"a",dir:"in",dx:0,dy:24},{name:"y",dir:"out",dx:74,dy:24}];
+    case "DFF":    return [
+      {name:"d",dir:"in",dx:0,dy:18},
+      {name:"r",dir:"in",dx:0,dy:35},
+      {name:"clk",dir:"in",dx:0,dy:54},
+      {name:"q",dir:"out",dx:74,dy:18}];
+    case "REG":{
+      const n=c.props.width, ps=[];
+      const step=18, top=16;
+      for(let i=0;i<n;i++) ps.push({name:"d"+i,dir:"in",dx:0,dy:top+i*step});
+      ps.push({name:"clk",dir:"in",dx:0,dy:top+n*step+8});
+      for(let i=0;i<n;i++) ps.push({name:"q"+i,dir:"out",dx:96,dy:top+i*step});
+      return ps;
+    }
+    default: // 2-input gates
+      return [{name:"a",dir:"in",dx:0,dy:14},{name:"b",dir:"in",dx:0,dy:38},
+              {name:"y",dir:"out",dx:74,dy:26}];
+  }
+}
+function compSize(c){
+  if(c.type==="REG"){const n=c.props.width;return {w:96,h:16+n*18+8+14};}
+  if(c.type==="DFF") return {w:74,h:72};
+  if(c.type==="CONST0"||c.type==="CONST1") return {w:50,h:36};
+  if(c.type==="IN"||c.type==="OUT"||c.type==="CLK") return {w:70,h:40};
+  if(c.type==="NOT"||c.type==="BUF") return {w:74,h:48};
+  return {w:74,h:52};
+}
+
+/* ============================================================
+   adding / removing
+   ============================================================ */
+function addComp(type, x, y){
+  const id = "c"+(nextId++);
+  comps[id] = {type, x:Math.round(x/11)*11, y:Math.round(y/11)*11, props:defaultProps(type)};
+  render(); save();
+  return id;
+}
+function removeComp(id){
+  delete comps[id];
+  wires = wires.filter(w=>w.from.c!==id && w.to.c!==id);
+  render(); save();
+}
+function removeWire(id){
+  wires = wires.filter(w=>w.id!==id);
+  render(); save();
+}
+
+/* connect: a must be one out and one in */
+function tryConnect(p1,p2){
+  let out,inn;
+  if(p1.dir==="out"&&p2.dir==="in"){out=p1;inn=p2;}
+  else if(p1.dir==="in"&&p2.dir==="out"){out=p2;inn=p1;}
+  else { flash("Connect an output pad to an input pad"); return; }
+  if(out.c===inn.c){ flash("Cannot wire a part to itself"); return; }
+  // an input takes at most one driver
+  const exists = wires.find(w=>w.to.c===inn.c && w.to.p===inn.p);
+  if(exists){ flash("That input already has a driver"); return; }
+  wires.push({id:"w"+(nextId++), from:{c:out.c,p:out.p}, to:{c:inn.c,p:inn.p}});
+  render(); save();
+}
+
+/* ============================================================
+   rendering
+   ============================================================ */
+function portPos(c, port){
+  const comp = comps[c];
+  const p = portsOf(comp).find(q=>q.name===port);
+  return {x:comp.x+p.dx, y:comp.y+p.dy, dir:p.dir};
+}
+
+function render(){
+  VIEW.setAttribute("transform",`translate(${view.tx},${view.ty}) scale(${view.scale})`);
+  // wires
+  GW.textContent="";
+  for(const w of wires){
+    const a=portPos(w.from.c,w.from.p), b=portPos(w.to.c,w.to.p);
+    const path=document.createElementNS(NS,"path");
+    path.setAttribute("d",wirePath(a,b));
+    path.setAttribute("class","wire"+(selected&&selected.kind==="wire"&&selected.id===w.id?" sel":""));
+    path.dataset.wire=w.id;
+    GW.appendChild(path);
+  }
+  // comps
+  GC.textContent="";
+  for(const id in comps) GC.appendChild(drawComp(id));
+  updateLamp();
+  refreshOutput();
+}
+
+function wirePath(a,b){
+  const dx=Math.max(28,Math.abs(b.x-a.x)*0.5);
+  return `M ${a.x} ${a.y} C ${a.x+dx} ${a.y}, ${b.x-dx} ${b.y}, ${b.x} ${b.y}`;
+}
+
+function el(tag,attrs){
+  const n=document.createElementNS(NS,tag);
+  for(const k in attrs) n.setAttribute(k,attrs[k]);
+  return n;
+}
+
+function drawComp(id){
+  const c=comps[id];
+  const g=el("g",{class:"comp"+(selected&&selected.kind==="comp"&&selected.id===id?" sel":""),
+    transform:`translate(${c.x},${c.y})`});
+  g.dataset.comp=id;
+  const sz=compSize(c);
+
+  // body + glyph
+  glyph(g,c,sz);
+
+  // ports
+  for(const p of portsOf(c)){
+    const port=el("circle",{class:"port "+(p.dir),cx:p.dx,cy:p.dy,r:4.5});
+    port.dataset.comp=id; port.dataset.port=p.name; port.dataset.dir=p.dir;
+    if(pending&&pending.c===id&&pending.p===p.name) port.classList.add("pending");
+    g.appendChild(port);
+    // small port label for sequential parts
+    if(c.type==="DFF"||c.type==="REG"){
+      const t=el("text",{class:"portlbl",x:p.dir==="in"?p.dx+8:p.dx-8,y:p.dy+3,
+        "text-anchor":p.dir==="in"?"start":"end"});
+      t.textContent=p.name.toUpperCase();
+      g.appendChild(t);
+    }
+  }
+  return g;
+}
+
+/* draw the body shape + label for each type */
+function glyph(g,c,sz){
+  const add=(tag,a)=>{const n=el(tag,a);g.appendChild(n);return n;};
+  const label=(txt,x,y,cls)=>{const t=el("text",{class:cls||"lbl",x,y});t.textContent=txt;g.appendChild(t);return t;};
+
+  const t=c.type;
+  if(t==="IN"||t==="OUT"){
+    // a tag / flag shape
+    const dir = t==="IN";
+    add("path",{class:"body", d: dir
+      ? "M2 6 L48 6 L66 20 L48 34 L2 34 Z"
+      : "M8 6 L68 6 L68 34 L8 34 L-8 20 Z"});
+    label(c.props.pin, 36, 18);
+    label(t==="IN"?"IN":"OUT", 36, 29, "sub");
+  }
+  else if(t==="CLK"){
+    add("rect",{class:"body",x:2,y:4,width:60,height:32,rx:5});
+    // clock glyph
+    add("path",{class:"glyph",d:"M14 26 L14 16 L22 16 L22 26 L30 26 L30 16 L38 16"});
+    label("iCLK",46,29,"sub");
+  }
+  else if(t==="CONST0"||t==="CONST1"){
+    add("rect",{class:"body",x:2,y:2,width:42,height:32,rx:5});
+    label(t==="CONST1"?"1":"0",22,23);
+  }
+  else if(t==="DFF"){
+    add("rect",{class:"body",x:6,y:2,width:62,height:68,rx:4});
+    add("path",{class:"glyph",d:"M6 46 L14 52 L6 58"}); // clock notch
+    label("DFF",37,40);
+  }
+  else if(t==="REG"){
+    add("rect",{class:"body",x:6,y:2,width:84,height:sz.h-4,rx:4});
+    add("path",{class:"glyph",d:`M6 ${16+c.props.width*18+2} L14 ${16+c.props.width*18+8} L6 ${16+c.props.width*18+14}`});
+    label("REG",48,sz.h/2-2);
+    label(c.props.width+"-bit",48,sz.h/2+11,"sub");
+  }
+  else {
+    // gates: draw classic shapes inside a transparent hit body
+    add("rect",{class:"body",x:0,y:0,width:sz.w,height:sz.h,rx:6,style:"fill:#13211a;stroke:none"});
+    drawGate(g,t,sz);
+    label(t, sz.w/2+2, sz.h-4, "sub");
+  }
+}
+
+function drawGate(g,type,sz){
+  const add=(d)=>g.appendChild(el("path",{class:"glyph",d}));
+  const bub=(cx,cy)=>g.appendChild(el("circle",{class:"glyph",cx,cy,r:4,style:"fill:#13211a"}));
+  // canonical bodies sized to ~ x:10..58, y:8..44
+  const isOr = (type==="OR"||type==="NOR"||type==="XOR"||type==="XNOR");
+  if(type==="AND"||type==="NAND"){
+    add("M16 8 L34 8 A18 18 0 0 1 34 44 L16 44 Z");
+    // input stubs
+    add("M0 14 L16 14"); add("M0 38 L16 38"); add("M52 26 L74 26");
+    if(type==="NAND"){ bub(56,26); }
+  } else if(isOr){
+    add("M14 8 Q34 8 54 26 Q34 44 14 44 Q24 26 14 8 Z");
+    add("M0 14 L18 14"); add("M0 38 L18 38");
+    add(type==="XOR"||type==="XNOR" ? "M58 26 L74 26":"M54 26 L74 26");
+    if(type==="XOR"||type==="XNOR") add("M8 8 Q18 26 8 44");
+    if(type==="NOR"||type==="XNOR"){ bub(58,26); }
+  } else if(type==="NOT"||type==="BUF"){
+    add("M16 10 L52 26 L16 42 Z");
+    add("M0 26 L16 26"); add(type==="NOT"?"M60 26 L74 26":"M52 26 L74 26");
+    if(type==="NOT") bub(56,26);
+  }
+}
+
+/* ============================================================
+   pointer interaction
+   ============================================================ */
+function svgPoint(evt){
+  const r=SVG.getBoundingClientRect();
+  return {
+    x:(evt.clientX-r.left-view.tx)/view.scale,
+    y:(evt.clientY-r.top-view.ty)/view.scale
+  };
+}
+
+SVG.addEventListener("pointerdown",(e)=>{
+  const port=e.target.closest(".port");
+  const comp=e.target.closest(".comp");
+  const wire=e.target.closest(".wire");
+
+  // placing a new part
+  if(armed){
+    const p=svgPoint(e);
+    addComp(armed, p.x-20, p.y-20);
+    disarm();
+    return;
+  }
+  // start wire from a port
+  if(port){
+    pending={c:port.dataset.comp,p:port.dataset.port,dir:port.dataset.dir};
+    const pos=portPos(pending.c,pending.p);
+    RUBBER.style.display="";
+    RUBBER.setAttribute("d",wirePath(pos,pos));
+    render();
+    e.preventDefault();
+    return;
+  }
+  // select + drag comp
+  if(comp){
+    select("comp",comp.dataset.comp);
+    const c=comps[comp.dataset.comp];
+    const p=svgPoint(e);
+    dragComp={id:comp.dataset.comp,dx:p.x-c.x,dy:p.y-c.y};
+    SVG.setPointerCapture(e.pointerId);
+    return;
+  }
+  // select wire
+  if(wire){ select("wire",wire.dataset.wire); return; }
+  // empty: deselect + pan
+  select(null);
+  panning={x:e.clientX,y:e.clientY,tx:view.tx,ty:view.ty};
+  SVG.setPointerCapture(e.pointerId);
+});
+
+SVG.addEventListener("pointermove",(e)=>{
+  if(pending){
+    const a=portPos(pending.c,pending.p);
+    const b=svgPoint(e);
+    RUBBER.setAttribute("d",wirePath(a, {x:b.x,y:b.y}));
+    return;
+  }
+  if(dragComp){
+    const p=svgPoint(e);
+    const c=comps[dragComp.id];
+    c.x=Math.round((p.x-dragComp.dx)/11)*11;
+    c.y=Math.round((p.y-dragComp.dy)/11)*11;
+    render();
+    return;
+  }
+  if(panning){
+    view.tx=panning.tx+(e.clientX-panning.x);
+    view.ty=panning.ty+(e.clientY-panning.y);
+    render();
+  }
+});
+
+SVG.addEventListener("pointerup",(e)=>{
+  if(pending){
+    const port=e.target.closest(".port");
+    if(port){
+      tryConnect(pending,{c:port.dataset.comp,p:port.dataset.port,dir:port.dataset.dir});
+    }
+    pending=null; RUBBER.style.display="none"; render();
+  }
+  if(dragComp){ dragComp=null; save(); }
+  if(panning){ panning=null; }
+});
+
+SVG.addEventListener("dblclick",(e)=>{
+  const comp=e.target.closest(".comp");
+  if(!comp) return;
+  const c=comps[comp.dataset.comp];
+  if(c.type==="IN"||c.type==="OUT"){
+    const cur=PIN_LIST.indexOf(c.props.pin);
+    c.props.pin=PIN_LIST[(cur+1)%PIN_LIST.length];
+    render(); save();
+  } else if(c.type==="REG"){
+    const ws=[2,4,8,16]; const i=ws.indexOf(c.props.width);
+    c.props.width=ws[(i+1)%ws.length];
+    render(); save();
+  }
+});
+
+/* right click deletes */
+SVG.addEventListener("contextmenu",(e)=>{
+  const comp=e.target.closest(".comp");
+  const wire=e.target.closest(".wire");
+  if(comp){e.preventDefault(); removeComp(comp.dataset.comp);}
+  else if(wire){e.preventDefault(); removeWire(wire.dataset.wire);}
+});
+
+/* wheel zoom */
+SVG.addEventListener("wheel",(e)=>{
+  if(!e.ctrlKey && !e.metaKey) return;
+  e.preventDefault();
+  zoomAt(e.clientX,e.clientY, e.deltaY<0?1.1:0.9);
+},{passive:false});
+
+document.addEventListener("keydown",(e)=>{
+  if(e.key==="Delete"||e.key==="Backspace"){
+    if(selected&&document.activeElement===document.body){
+      if(selected.kind==="comp") removeComp(selected.id);
+      else removeWire(selected.id);
+      selected=null;
+    }
+  } else if(e.key==="Escape"){ disarm(); pending=null; RUBBER.style.display="none"; render(); }
+});
+
+/* ============================================================
+   selection / palette / view helpers
+   ============================================================ */
+function select(kind,id){ selected = kind? {kind,id}:null; render(); }
+function arm(type,btn){
+  disarm();
+  armed=type; btn.classList.add("armed");
+  flash("Click the sheet to place "+labelFor(type));
+}
+function disarm(){
+  armed=null;
+  document.querySelectorAll(".pitem.armed").forEach(b=>b.classList.remove("armed"));
+  flash("");
+}
+function labelFor(t){
+  const m={IN:"an input pin",OUT:"an output pin",CLK:"a clock source",
+    CONST0:"a constant 0",CONST1:"a constant 1",DFF:"a D flip-flop",REG:"a register"};
+  return m[t]||("a "+t+" gate");
+}
+document.getElementById("palette").addEventListener("click",(e)=>{
+  const b=e.target.closest(".pitem"); if(!b) return;
+  if(b.classList.contains("armed")) disarm(); else arm(b.dataset.add,b);
+});
+
+function flash(msg){
+  const h=document.getElementById("hint");
+  h.textContent = msg || (Object.keys(comps).length? "Drag parts, wire pads, double-click pins to change them"
+                                                    : "Pick a part from the left to begin");
+}
+
+function zoomAt(clientX,clientY,factor){
+  const r=SVG.getBoundingClientRect();
+  const mx=clientX-r.left, my=clientY-r.top;
+  const wx=(mx-view.tx)/view.scale, wy=(my-view.ty)/view.scale;
+  view.scale=Math.min(2.4,Math.max(0.35,view.scale*factor));
+  view.tx=mx-wx*view.scale; view.ty=my-wy*view.scale;
+  document.getElementById("zoomTxt").textContent=Math.round(view.scale*100)+"%";
+  render();
+}
+document.getElementById("zoomIn").onclick=()=>{const r=SVG.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,1.12);};
+document.getElementById("zoomOut").onclick=()=>{const r=SVG.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,0.9);};
+document.getElementById("zoomFit").onclick=()=>{view={scale:1,tx:60,ty:60};document.getElementById("zoomTxt").textContent="100%";render();};
+
+/* ============================================================
+   CODE GENERATION
+   ============================================================ */
+function pinExpr(pin){
+  if(pin[0]==="A") return "bMKR_A["+pin.slice(1)+"]";
+  return "bMKR_D["+pin.slice(1)+"]";
+}
+function nm(id){ return id; } // ids are already short (c1, c2 ...)
+
+/* find the single driver wire feeding an input port */
+function driverOf(c,p){
+  const w=wires.find(w=>w.to.c===c && w.to.p===p);
+  return w? w.from : null;
+}
+/* expression produced by an output port */
+function outExpr(from){
+  const c=comps[from.c];
+  switch(c.type){
+    case "IN":     return "w_"+from.c;
+    case "CLK":    return "iCLK";
+    case "CONST0": return "1'b0";
+    case "CONST1": return "1'b1";
+    case "DFF":    return "r_"+from.c;
+    case "REG":    return "r_"+from.c+"["+from.p.slice(1)+"]";
+    default:       return "w_"+from.c;      // gate
+  }
+}
+/* expression feeding an input port, or null if floating */
+function inExpr(c,p){
+  const d=driverOf(c,p);
+  return d? outExpr(d) : null;
+}
+
+const GATEOP = {
+  AND:(a,b)=>`${a} & ${b}`,
+  OR:(a,b)=>`${a} | ${b}`,
+  XOR:(a,b)=>`${a} ^ ${b}`,
+  NAND:(a,b)=>`~(${a} & ${b})`,
+  NOR:(a,b)=>`~(${a} | ${b})`,
+  XNOR:(a,b)=>`~(${a} ^ ${b})`,
+  NOT:(a)=>`~${a}`,
+  BUF:(a)=>`${a}`
+};
+
+function generate(){
+  const diags=[];           // {level, msg}
+  const ids=Object.keys(comps);
+
+  // ---- pin usage checks ----
+  const outPins={}, inPins={};
+  for(const id of ids){
+    const c=comps[id];
+    if(c.type==="OUT"){(outPins[c.props.pin]=outPins[c.props.pin]||[]).push(id);}
+    if(c.type==="IN"){(inPins[c.props.pin]=inPins[c.props.pin]||[]).push(id);}
+  }
+  for(const pin in outPins) if(outPins[pin].length>1)
+    diags.push({level:"err",msg:"Pin "+pin+" is driven by more than one output part"});
+  for(const pin in outPins) if(inPins[pin])
+    diags.push({level:"err",msg:"Pin "+pin+" is used as both input and output"});
+
+  // ---- collect declarations ----
+  const wireDecls=[], regDecls=[], assigns=[], always=[], aliases=[];
+
+  for(const id of ids){
+    const c=comps[id];
+    if(c.type==="IN"){
+      wireDecls.push("wire        w_"+id+";");
+      aliases.push("assign w_"+id+" = "+pinExpr(c.props.pin)+";   // "+c.props.pin+" into fabric");
+    }
+    else if(["AND","OR","XOR","NAND","NOR","XNOR","NOT","BUF"].includes(c.type)){
+      wireDecls.push("wire        w_"+id+";");
+    }
+    else if(c.type==="DFF") regDecls.push("reg         r_"+id+";");
+    else if(c.type==="REG") regDecls.push("reg  ["+(c.props.width-1)+":0] r_"+id+";");
+  }
+
+  // ---- gate assigns ----
+  for(const id of ids){
+    const c=comps[id];
+    if(!["AND","OR","XOR","NAND","NOR","XNOR","NOT","BUF"].includes(c.type)) continue;
+    let expr;
+    if(c.type==="NOT"||c.type==="BUF"){
+      let a=inExpr(id,"a");
+      if(a===null){diags.push({level:"err",msg:label(id)+" input A is floating"});a="1'b0";}
+      expr=GATEOP[c.type](a);
+    } else {
+      let a=inExpr(id,"a"), b=inExpr(id,"b");
+      if(a===null){diags.push({level:"err",msg:label(id)+" input A is floating"});a="1'b0";}
+      if(b===null){diags.push({level:"err",msg:label(id)+" input B is floating"});b="1'b0";}
+      expr=GATEOP[c.type](a,b);
+    }
+    assigns.push("assign w_"+id+" = "+expr+";");
+  }
+
+  // ---- output pins ----
+  for(const id of ids){
+    const c=comps[id]; if(c.type!=="OUT") continue;
+    let src=inExpr(id,"io");
+    if(src===null){diags.push({level:"err",msg:"Output pin "+c.props.pin+" has nothing driving it"});src="1'b0";}
+    assigns.push("assign "+pinExpr(c.props.pin)+" = "+src+";   // fabric drives "+c.props.pin);
+  }
+
+  // ---- flip-flops ----
+  for(const id of ids){
+    const c=comps[id]; if(c.type!=="DFF") continue;
+    let d=inExpr(id,"d"), clk=inExpr(id,"clk"), r=inExpr(id,"r");
+    if(d===null){diags.push({level:"err",msg:label(id)+" data D is floating"});d="1'b0";}
+    if(clk===null){clk="iCLK";diags.push({level:"warn",msg:label(id)+" clock not wired, defaulting to iCLK"});}
+    if(r===null){
+      always.push(
+        "always @(posedge "+clk+") begin",
+        "  r_"+id+" <= "+d+";",
+        "end");
+    } else {
+      always.push(
+        "always @(posedge "+clk+" or posedge "+r+") begin",
+        "  if ("+r+") r_"+id+" <= 1'b0;",
+        "  else      r_"+id+" <= "+d+";",
+        "end");
+    }
+  }
+
+  // ---- registers ----
+  for(const id of ids){
+    const c=comps[id]; if(c.type!=="REG") continue;
+    let clk=inExpr(id,"clk");
+    if(clk===null){clk="iCLK";diags.push({level:"warn",msg:label(id)+" clock not wired, defaulting to iCLK"});}
+    const bits=[];
+    for(let i=c.props.width-1;i>=0;i--){
+      let b=inExpr(id,"d"+i);
+      if(b===null){b="1'b0";diags.push({level:"warn",msg:label(id)+" bit D"+i+" is floating, tied low"});}
+      bits.push(b);
+    }
+    always.push(
+      "always @(posedge "+clk+") begin",
+      "  r_"+id+" <= {"+bits.join(", ")+"};",
+      "end");
+  }
+
+  // ---- combinational loop check (gates + pin aliases only) ----
+  detectCombLoops(diags);
+
+  // ---- assemble user.v ----
+  const L=[];
+  L.push("// ---------------------------------------------------------------");
+  L.push("// user.v  -  generated by GATEWRIGHT");
+  L.push("// Included by "+TOPMOD+" via the include \"user.v\" hook.");
+  L.push("// Target: "+DEVICE+"  ("+FAMILY+")");
+  L.push("// Available here: iCLK, iRESETn, bMKR_AREF, bMKR_A[6:0], bMKR_D[14:0]");
+  L.push("// License: GPL-3.0");
+  L.push("// ---------------------------------------------------------------");
+  L.push("");
+  if(!ids.length){
+    L.push("// Empty sheet. Place parts and wire them to MKR pins.");
+  } else {
+    if(wireDecls.length){ L.push("// nets"); L.push(...wireDecls); L.push(""); }
+    if(regDecls.length){ L.push("// state"); L.push(...regDecls); L.push(""); }
+    if(aliases.length){ L.push("// input pins"); L.push(...aliases); L.push(""); }
+    if(assigns.length){ L.push("// combinational"); L.push(...assigns); L.push(""); }
+    if(always.length){ L.push("// sequential"); L.push(...always); L.push(""); }
+  }
+  const verilog=L.join("\n").replace(/\n{3,}/g,"\n\n").trimEnd()+"\n";
+
+  return {verilog, diags};
+}
+
+function label(id){
+  const c=comps[id];
+  if(!c) return id;
+  if(c.type==="IN"||c.type==="OUT") return c.props.pin+" "+c.type.toLowerCase()+" ("+id+")";
+  return c.type+" ("+id+")";
+}
+
+function detectCombLoops(diags){
+  // edges: input port driven by output of a comb part -> dependency
+  const comb=new Set(["AND","OR","XOR","NAND","NOR","XNOR","NOT","BUF","IN","OUT","CONST0","CONST1","CLK"]);
+  const adj={};
+  for(const w of wires){
+    const fc=comps[w.from.c], tc=comps[w.to.c];
+    if(!fc||!tc) continue;
+    if(!comb.has(fc.type)||!comb.has(tc.type)) continue; // FF/REG break loops
+    (adj[w.from.c]=adj[w.from.c]||[]).push(w.to.c);
+  }
+  const state={};
+  let found=false;
+  function dfs(n){
+    state[n]=1;
+    for(const m of (adj[n]||[])){
+      if(state[m]===1){found=true;return;}
+      if(!state[m]) dfs(m);
+    }
+    state[n]=2;
+  }
+  for(const id in comps){ if(!state[id]) dfs(id); if(found) break; }
+  if(found) diags.push({level:"warn",msg:"Combinational feedback loop detected. Break it with a flip-flop or register."});
+}
+
+/* ============================================================
+   sketch / pin map / flow text
+   ============================================================ */
+function genSketch(){
+  const used=usedPins();
+  const outs=used.filter(u=>u.dir==="out");
+  const ins=used.filter(u=>u.dir==="in");
+  const L=[];
+  L.push("/*");
+  L.push(" * sketch.ino  -  companion for a GATEWRIGHT design");
+  L.push(" * MKR VIDOR 4000. The FPGA bitstream auto-loads at boot from");
+  L.push(" * the flash image built by Quartus, so this sketch only needs");
+  L.push(" * to bring the FPGA up and, if you wish, observe the pins from");
+  L.push(" * the SAMD21 side. The fabric drives and reads the MKR pads.");
+  L.push(" * License: GPL-3.0");
+  L.push(" */");
+  L.push("");
+  L.push("// The bring-up include depends on which VidorBitstream template");
+  L.push("// you built against. For the standard peripheral image use:");
+  L.push("//   #include \"VidorPeripherals.h\"   // then FPGA.begin();");
+  L.push("// For a bare logic image the SAMD21 just needs to release the");
+  L.push("// FPGA reset, which the bootloader already handles.");
+  L.push("");
+  L.push("void setup() {");
+  L.push("  Serial.begin(115200);");
+  L.push("  // FPGA.begin();   // uncomment if using VidorPeripherals");
+  L.push("");
+  if(ins.length){
+    L.push("  // Pins the fabric DRIVES (read them from the SAMD21 side):");
+    ins.forEach(p=>L.push("  pinMode("+p.pin+", INPUT);"));
+  }
+  if(outs.length){
+    // outs here = OUTPUT parts in GUI = fabric drives the pin, SAMD reads
+  }
+  L.push("}");
+  L.push("");
+  L.push("void loop() {");
+  if(ins.length){
+    ins.forEach(p=>L.push("  Serial.print(\""+p.pin+"=\"); Serial.println(digitalRead("+p.pin+"));"));
+    L.push("  delay(200);");
+  } else {
+    L.push("  // Fabric runs on its own. Nothing required here.");
+    L.push("  delay(1000);");
+  }
+  L.push("}");
+  L.push("");
+  return L.join("\n");
+}
+
+/* In GUI terms: OUT part = fabric output (fabric drives pin).
+   IN part  = fabric input (an external signal enters the fabric). */
+function usedPins(){
+  const r=[];
+  for(const id in comps){
+    const c=comps[id];
+    if(c.type==="OUT") r.push({pin:c.props.pin,dir:"out"});
+    if(c.type==="IN")  r.push({pin:c.props.pin,dir:"in"});
+  }
+  return r;
+}
+
+function genPinMap(){
+  const used=usedPins();
+  const L=[];
+  L.push("MKR VIDOR 4000  -  pins used by this design");
+  L.push("=================================================");
+  L.push("");
+  L.push("FPGA top port  : "+TOPMOD);
+  L.push("Device         : "+DEVICE);
+  L.push("Family         : "+FAMILY);
+  L.push("");
+  if(!used.length){ L.push("No MKR pins placed yet."); return L.join("\n"); }
+  L.push("MKR pin   FPGA ball   direction   Verilog net");
+  L.push("-------   ---------   ---------   -----------------");
+  for(const u of used){
+    const ball=PIN_BALL[u.pin]||"?";
+    const dir = u.dir==="out" ? "fabric out" : "fabric in ";
+    L.push(
+      u.pin.padEnd(8)+
+      ("PIN_"+ball).padEnd(12)+
+      dir.padEnd(12)+
+      pinExpr(u.pin));
+  }
+  L.push("");
+  L.push("These balls match Arduino's vidor_s_pins.qsf. Import that file");
+  L.push("into your Quartus project (Assignments, Import Assignments) so");
+  L.push("the Pin Planner is populated. Do not hand-edit the balls.");
+  return L.join("\n");
+}
+
+function genFlow(){
+  return [
+"QUARTUS FLOW  -  from this sheet to a running board",
+"===================================================",
+"",
+"Prerequisite: Intel Quartus Prime Lite (free). The Cyclone 10 LP",
+"part has no open-source synthesis path, so Quartus does the place",
+"and route and produces the .ttf image. This tool only writes the",
+"Verilog source.",
+"",
+"1. Get the Arduino FPGA template project. A clean starting point",
+"   is the VidorFPGA template (vidor-libraries on GitHub, or the",
+"   wd5gnr tutorial fork). It already contains "+TOPMOD+",",
+"   the SYSTEM_PLL, and the include \"user.v\" hook.",
+"",
+"2. Drop the generated user.v into the project's project folder,",
+"   replacing the stub. Your logic lands inside the top module and",
+"   sees iCLK, iRESETn, bMKR_AREF, bMKR_A[6:0] and bMKR_D[14:0].",
+"",
+"3. Open the project in Quartus. Confirm the device reads",
+"   "+DEVICE+" and the family reads "+FAMILY+".",
+"",
+"4. Import Arduino's vidor_s_pins.qsf (Assignments, Import",
+"   Assignments, Pin and Location Assignments only) so the balls",
+"   in the pin map tab are assigned.",
+"",
+"5. Make sure GENERATE_TTF_FILE is ON in the project settings, then",
+"   run Start Compilation. Quartus writes a Tabular Text File (.ttf).",
+"",
+"6. Convert and embed the .ttf per the template's build script, then",
+"   upload the companion sketch with the Arduino IDE. The SAMD21",
+"   loads the fabric at boot and your gates go live on the pins.",
+"",
+"Note: AREF is an analog reference pad and is left out of the pin",
+"choices here on purpose. Stick to D0..D14 and A0..A6 for logic."
+  ].join("\n");
+}
+
+/* ============================================================
+   output panel
+   ============================================================ */
+let curTab="verilog";
+let lastGen={verilog:"",diags:[]};
+
+function refreshOutput(){
+  lastGen=generate();
+  const fnmap={verilog:"user.v",sketch:"sketch.ino",pins:"pinmap.txt",flow:"quartus_flow.txt"};
+  document.getElementById("outfn").textContent=fnmap[curTab];
+  let body="";
+  if(curTab==="verilog") body=lastGen.verilog;
+  else if(curTab==="sketch") body=genSketch();
+  else if(curTab==="pins") body=genPinMap();
+  else body=genFlow();
+  document.getElementById("codebox").textContent=body;
+  renderDiag(lastGen.diags);
+}
+
+function renderDiag(diags){
+  const d=document.getElementById("diag");
+  const errs=diags.filter(x=>x.level==="err");
+  const warns=diags.filter(x=>x.level==="warn");
+  let html="<h5>Design check</h5>";
+  if(!Object.keys(comps).length){ d.innerHTML=html+"<div class='clean'>Empty sheet. Place a part to begin.</div>"; return; }
+  if(!errs.length && !warns.length){
+    html+="<div class='row ok'><b>OK</b><span>Netlist is clean and ready to synthesize.</span></div>";
+  }
+  for(const e of errs) html+="<div class='row err'><b>FIX</b><span>"+esc(e.msg)+"</span></div>";
+  for(const w of warns) html+="<div class='row warn'><b>NOTE</b><span>"+esc(w.msg)+"</span></div>";
+  d.innerHTML=html;
+}
+function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+
+function updateLamp(){
+  const lamp=document.getElementById("lamp"), txt=document.getElementById("lamptxt");
+  const n=Object.keys(comps).length;
+  if(!n){lamp.className="bulb";txt.textContent="empty sheet";return;}
+  const g=generate();
+  const errs=g.diags.filter(x=>x.level==="err").length;
+  if(errs){lamp.className="bulb bad";txt.textContent=errs+" to fix";}
+  else {lamp.className="bulb ok";txt.textContent="ready to synthesize";}
+}
+
+document.getElementById("tabs").addEventListener("click",(e)=>{
+  const t=e.target.closest(".tab"); if(!t) return;
+  curTab=t.dataset.tab;
+  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x===t));
+  refreshOutput();
+});
+
+document.getElementById("btnCopy").onclick=()=>{
+  navigator.clipboard.writeText(document.getElementById("codebox").textContent)
+    .then(()=>flash("Copied "+document.getElementById("outfn").textContent));
+};
+document.getElementById("btnDl").onclick=()=>{
+  const fn=document.getElementById("outfn").textContent;
+  download(fn, document.getElementById("codebox").textContent);
+};
+
+/* ============================================================
+   persistence
+   ============================================================ */
+function serialize(){return JSON.stringify({v:1,nextId,comps,wires},null,2);}
+function save(){ try{localStorage.setItem("gatewright",serialize());}catch(e){} }
+function load(){
+  try{
+    const s=localStorage.getItem("gatewright");
+    if(s) loadObj(JSON.parse(s));
+  }catch(e){}
+}
+function loadObj(o){
+  comps=o.comps||{}; wires=o.wires||[]; nextId=o.nextId||1;
+  selected=null; render();
+}
+function download(name,text){
+  const b=new Blob([text],{type:"text/plain"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(b); a.download=name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+}
+
+document.getElementById("btnExport").onclick=()=>download("gatewright_design.json",serialize());
+document.getElementById("btnImport").onclick=()=>document.getElementById("fileIn").click();
+document.getElementById("fileIn").addEventListener("change",(e)=>{
+  const f=e.target.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{ try{loadObj(JSON.parse(r.result)); save(); flash("Design loaded");}
+    catch(err){flash("That file could not be read as a design");} };
+  r.readAsText(f);
+  e.target.value="";
+});
+document.getElementById("btnClear").onclick=()=>{
+  if(Object.keys(comps).length && !confirm("Clear the whole sheet?")) return;
+  comps={};wires=[];nextId=1;selected=null;render();save();
+};
+
+/* ============================================================
+   starter example
+   ============================================================ */
+function loadExample(){
+  comps={}; wires=[]; nextId=1;
+  const a=addComp("IN",40,60);  comps[a].props.pin="A0";
+  const b=addComp("IN",40,150); comps[b].props.pin="A1";
+  const x=addComp("XOR",230,90);
+  const o=addComp("OUT",430,96); comps[o].props.pin="D0";
+  // wire A0->xor.a, A1->xor.b, xor.y->D0
+  wires=[
+    {id:"w"+(nextId++),from:{c:a,p:"io"},to:{c:x,p:"a"}},
+    {id:"w"+(nextId++),from:{c:b,p:"io"},to:{c:x,p:"b"}},
+    {id:"w"+(nextId++),from:{c:x,p:"y"},to:{c:o,p:"io"}}
+  ];
+  view={scale:1,tx:40,ty:40};
+  render(); save();
+  flash("Example loaded: A0 XOR A1 drives D0");
+}
+document.getElementById("btnExample").onclick=loadExample;
+
+/* ============================================================
+   icons in palette (simple inline svg)
+   ============================================================ */
+(function paintIcons(){
+  const ic={
+    IN:'<path d="M2 4 L12 4 L18 9 L12 14 L2 14 Z" fill="none" stroke="#6f8f7a" stroke-width="1.5"/>',
+    OUT:'<path d="M4 4 L18 4 L18 14 L4 14 L-1 9 Z" fill="none" stroke="#6f8f7a" stroke-width="1.5"/>',
+    CLK:'<path d="M3 13 L3 6 L8 6 L8 13 L13 13 L13 6 L18 6" fill="none" stroke="#c08a4a" stroke-width="1.5"/>',
+    CONST0:'<circle cx="9" cy="9" r="6" fill="none" stroke="#6f8f7a" stroke-width="1.5"/>',
+    CONST1:'<path d="M9 3 L9 15 M6 6 L9 3" fill="none" stroke="#6f8f7a" stroke-width="1.5"/>',
+    AND:'<path d="M4 3 L9 3 A6 6 0 0 1 9 15 L4 15 Z M0 6 L4 6 M0 12 L4 12 M15 9 L20 9" fill="none" stroke="#d8e3da" stroke-width="1.3"/>',
+    OR:'<path d="M3 3 Q9 3 16 9 Q9 15 3 15 Q6 9 3 3 Z M16 9 L20 9" fill="none" stroke="#d8e3da" stroke-width="1.3"/>',
+    XOR:'<path d="M5 3 Q11 3 17 9 Q11 15 5 15 Q8 9 5 3 Z M2 3 Q5 9 2 15 M17 9 L20 9" fill="none" stroke="#d8e3da" stroke-width="1.3"/>',
+    NAND:'<path d="M4 3 L9 3 A6 6 0 0 1 9 15 L4 15 Z" fill="none" stroke="#d8e3da" stroke-width="1.3"/><circle cx="17" cy="9" r="2" fill="none" stroke="#d8e3da" stroke-width="1.2"/>',
+    NOR:'<path d="M3 3 Q9 3 15 9 Q9 15 3 15 Q6 9 3 3 Z" fill="none" stroke="#d8e3da" stroke-width="1.3"/><circle cx="17" cy="9" r="2" fill="none" stroke="#d8e3da" stroke-width="1.2"/>',
+    XNOR:'<path d="M5 3 Q11 3 16 9 Q11 15 5 15 Q8 9 5 3 Z M2 3 Q5 9 2 15" fill="none" stroke="#d8e3da" stroke-width="1.3"/><circle cx="18" cy="9" r="1.8" fill="none" stroke="#d8e3da" stroke-width="1.2"/>',
+    NOT:'<path d="M5 3 L15 9 L5 15 Z M0 9 L5 9" fill="none" stroke="#d8e3da" stroke-width="1.3"/><circle cx="17" cy="9" r="2" fill="none" stroke="#d8e3da" stroke-width="1.2"/>',
+    BUF:'<path d="M5 3 L16 9 L5 15 Z M0 9 L5 9 M16 9 L20 9" fill="none" stroke="#d8e3da" stroke-width="1.3"/>',
+    DFF:'<rect x="3" y="2" width="13" height="14" rx="1.5" fill="none" stroke="#d8e3da" stroke-width="1.3"/><path d="M3 11 L6 13 L3 15" fill="none" stroke="#d8e3da" stroke-width="1.1"/>',
+    REG:'<rect x="2" y="3" width="15" height="12" rx="1.5" fill="none" stroke="#d8e3da" stroke-width="1.3"/><path d="M6 3 L6 15 M10 3 L10 15" stroke="#d8e3da" stroke-width="1"/>'
+  };
+  document.querySelectorAll(".pitem").forEach(b=>{
+    const t=b.dataset.add;
+    b.innerHTML=b.innerHTML.replace("[ICON]",
+      '<svg width="20" height="18" viewBox="0 0 20 18">'+(ic[t]||"")+'</svg>');
+  });
+})();
+
+/* ============================================================
+   boot
+   ============================================================ */
+load();
+if(!Object.keys(comps).length) loadExample();
+render();
+window.addEventListener("resize",render);
+</script>
+</body>
+</html>
